@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data (large, pack and transfer separately)
+data/processed/
+data/raw/
+data/clustering/
+data/all_enzymes.fasta
+data/split_clustered.json
+data/data_stats*.json
+weights/
+
+# Misc
+123
+
+# Data processing scripts (already done, not needed for training)
+data/scripts/
+scripts/preprocess_pdbs.py
+scripts/build_split.py
+scripts/export_fasta.py
+scripts/run_clustering.sh
+scripts/data_stats.py
+scripts/validate_parsing.py
+scripts/test_real_data.py
+scripts/analyze_*.py
+
+# Example files
+example_pdb/
+
+# Training outputs
+checkpoints/
+wandb/
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# pytest / ruff
+.pytest_cache/
+.ruff_cache/
+
+# Claude Code
+.claude/
+scripts/preflight.py

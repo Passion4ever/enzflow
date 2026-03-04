@@ -1,0 +1,28 @@
+# enzflow pinned environment — Python 3.10, CUDA 12.1
+#
+# Setup:
+#   conda create -n enzflow python=3.10 -y && conda activate enzflow
+#   pip install torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements.txt
+#   pip install -e .
+#   (optional) WANDB_BUILD_SKIP_GPU_STATS=true pip install wandb==0.25.0
+
+# Core (torch already installed above with CUDA index)
+numpy==2.2.6
+einops==0.8.2
+gemmi==0.7.5
+
+# Training
+accelerate==1.12.0
+
+# Data processing (scripts/)
+lmdb==1.7.5
+tqdm==4.67.3
+httpx[socks]
+
+# EC vector generation (data/scripts/)
+transformers==5.2.0
+
+# Dev
+pytest==9.0.2
+ruff==0.15.4
