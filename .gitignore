@@ -7,12 +7,8 @@ build/
 .eggs/
 
 # Data (large, pack and transfer separately)
-data/processed/
-data/raw/
-data/clustering/
-data/all_enzymes.fasta
-data/split_clustered.json
-data/data_stats*.json
+data/           
+!data/.gitkeep
 weights/
 
 # Misc
@@ -20,20 +16,15 @@ weights/
 
 # Data processing scripts (already done, not needed for training)
 data/scripts/
-scripts/preprocess_pdbs.py
-scripts/build_split.py
-scripts/export_fasta.py
-scripts/run_clustering.sh
-scripts/data_stats.py
-scripts/validate_parsing.py
-scripts/test_real_data.py
-scripts/analyze_*.py
+scripts/*
+!scripts/train.py
+!scripts/train_sanity.py
 
 # Example files
 example_pdb/
 
 # Training outputs
-checkpoints/
+checkpoints
 wandb/
 
 # IDE / OS
@@ -48,4 +39,4 @@ wandb/
 
 # Claude Code
 .claude/
-scripts/preflight.py
+

@@ -10,6 +10,7 @@ coordinates x_t in the training loop to avoid information leakage.
 
 from __future__ import annotations
 
+import json
 import math
 import random
 from pathlib import Path
@@ -89,6 +90,7 @@ class ProteinDataset(Dataset):
         motif_min_res: int = 2,
         motif_max_res: int = 8,
         ec_level_weights: tuple[float, ...] = (0.10, 0.10, 0.15, 0.15, 0.20, 0.30),
+        max_seq_len: int = 512,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.ec_lookup = ec_lookup
@@ -107,11 +109,57 @@ class ProteinDataset(Dataset):
         if len(self.paths) == 0:
             raise FileNotFoundError(f"No .pt files found in {self.data_dir}")
 
-        # Cache lengths for BucketBatchSampler (cheap: load only aatype shape)
-        self._lengths: list[int] = []
-        for p in self.paths:
-            data = torch.load(p, map_location="cpu", weights_only=False)
-            self._lengths.append(len(data["aatype"]))
+        # Cache lengths for BucketBatchSampler
+        # Use a cached index file to avoid loading all .pt files on every startup
+        self._lengths = self._load_or_build_length_cache()
+
+        # Filter out sequences longer than max_seq_len
+        if max_seq_len > 0:
+            before = len(self.paths)
+            keep = [i for i, slen in enumerate(self._lengths) if slen <= max_seq_len]
+            self.paths = [self.paths[i] for i in keep]
+            self._lengths = [self._lengths[i] for i in keep]
+            dropped = before - len(self.paths)
+            if dropped > 0:
+                print(f"  Filtered by max_seq_len={max_seq_len}: "
+                      f"kept {len(self.paths)}, dropped {dropped}")
+
+    def _load_or_build_length_cache(self) -> list[int]:
+        """Load lengths from cache file, or build and save it.
+
+        Cache file: ``{data_dir}/length_cache.json``
+        Maps filename stem to sequence length. Only re-scans missing entries.
+        """
+        cache_path = self.data_dir / "length_cache.json"
+
+        # Load existing cache
+        cache: dict[str, int] = {}
+        if cache_path.exists():
+            with open(cache_path) as f:
+                cache = json.load(f)
+
+        # Check which files need scanning
+        lengths: list[int] = []
+        need_save = False
+        for i, p in enumerate(self.paths):
+            stem = p.stem
+            if stem in cache:
+                lengths.append(cache[stem])
+            else:
+                data = torch.load(p, map_location="cpu", weights_only=False)
+                length = len(data["aatype"])
+                lengths.append(length)
+                cache[stem] = length
+                need_save = True
+                if (i + 1) % 5000 == 0:
+                    print(f"  Scanning lengths: {i + 1}/{len(self.paths)}...")
+
+        if need_save:
+            print(f"  Saving length cache to {cache_path} ({len(cache)} entries)")
+            with open(cache_path, "w") as f:
+                json.dump(cache, f)
+
+        return lengths
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -345,6 +393,7 @@ def build_dataloader(
     motif_min_res: int = 2,
     motif_max_res: int = 8,
     ec_level_weights: tuple[float, ...] = (0.10, 0.10, 0.15, 0.15, 0.20, 0.30),
+    max_seq_len: int = 512,
 ) -> DataLoader:
     """Convenience builder for a training DataLoader with bucket sampling.
 
@@ -378,6 +427,7 @@ def build_dataloader(
         motif_min_res=motif_min_res,
         motif_max_res=motif_max_res,
         ec_level_weights=ec_level_weights,
+        max_seq_len=max_seq_len,
     )
 
     sampler = BucketBatchSampler(

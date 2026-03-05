@@ -1,0 +1,35 @@
+# Stage 2: Enzyme finetuning with EC conditioning
+run_name: finetune_enzyme_v1
+
+model:
+  d_token: 512
+  d_pair: 128
+  d_atom: 128
+  d_cond: 512
+  n_trunk: 12
+  n_atom_layers: 3
+  n_heads: 8
+
+training:
+  batch_size: 6
+  max_steps: 100000
+  lr: 5.0e-5
+  warmup_steps: 500
+  weight_decay: 0.01
+  grad_clip: 1.0
+  bf16: true
+  seed: 42
+
+data:
+  data_dir: data/processed/enzymes
+  ec_vectors_path: weights/ec_vectors_train.pt
+  num_workers: 4
+
+logging:
+  log_every: 50
+  ckpt_every: 5000
+  max_ckpts: 3
+  wandb: false
+  wandb_project: enzflow
+
+# resume: checkpoints/pretrain_afdb_v1/step_200000.pt

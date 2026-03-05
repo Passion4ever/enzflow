@@ -1,0 +1,45 @@
+# Stage 1: AFDB pretraining - learn general protein geometry
+run_name: pretrain_v1
+
+model:
+  d_token: 512
+  d_pair: 128
+  d_atom: 128
+  d_cond: 512
+  n_trunk: 12
+  n_atom_layers: 3
+  n_heads: 8
+
+training:
+  batch_size: 6
+  max_steps: 1000000
+  lr: 5.0e-5
+  warmup_steps: 10000
+  weight_decay: 0.01
+  grad_clip: 1.0
+  bf16: true
+  seed: 42
+
+data:
+  data_dir: data/processed/afdbs
+  ec_vectors_path: weights/ec_vectors_train.pt
+  num_workers: 4
+
+logging:
+  log_every: 200
+  ckpt_every: 10000
+  max_ckpts: 5
+  wandb: true
+  wandb_project: enzflow
+
+# -- Notification (optional, uncomment to enable) --
+telegram:
+  bot_token: "8754652470:AAGHdkkemoWlLrpZQ5-Z7Uz9HPe-Nn8mZp4"
+  chat_id: "5091947498"
+#
+# email:
+#   smtp_host: smtp.qq.com
+#   smtp_port: 465
+#   sender: your@qq.com
+#   password: your_smtp_password
+#   receiver: your@gmail.com
