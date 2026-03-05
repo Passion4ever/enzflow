@@ -22,6 +22,9 @@ scripts/*
 # Example files
 example_pdb/
 
+# Secrets
+.env
+
 # Training outputs
 checkpoints
 wandb/

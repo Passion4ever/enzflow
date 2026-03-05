@@ -31,15 +31,3 @@ logging:
   max_ckpts: 5
   wandb: true
   wandb_project: enzflow
-
-# -- Notification (optional, uncomment to enable) --
-telegram:
-  bot_token: "8754652470:AAGHdkkemoWlLrpZQ5-Z7Uz9HPe-Nn8mZp4"
-  chat_id: "5091947498"
-#
-# email:
-#   smtp_host: smtp.qq.com
-#   smtp_port: 465
-#   sender: your@qq.com
-#   password: your_smtp_password
-#   receiver: your@gmail.com

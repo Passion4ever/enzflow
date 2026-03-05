@@ -240,7 +240,22 @@ def infinite_loader(loader, batch_sampler):
         epoch += 1
 
 
+def _load_dotenv(path: str = ".env") -> None:
+    """Load .env file into os.environ if it exists."""
+    p = Path(path)
+    if not p.exists():
+        return
+    with open(p) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip())
+
+
 def main():
+    _load_dotenv()
     config_path, cli_overrides = parse_args()
     cfg = load_config(config_path, cli_overrides)
 

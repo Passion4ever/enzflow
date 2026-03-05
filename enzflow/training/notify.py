@@ -1,7 +1,14 @@
-"""Training notification via Telegram or Email."""
+"""Training notification via Telegram or Email.
+
+Sensitive credentials are read from environment variables, not config files.
+
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER
+"""
 
 from __future__ import annotations
 
+import os
 import smtplib
 import urllib.parse
 import urllib.request
@@ -50,22 +57,22 @@ def send_email(
 
 
 def notify(cfg: dict, message: str, subject: str = "enzflow") -> None:
-    """Send notification based on config.
+    """Send notification based on environment variables.
 
-    Checks cfg for 'telegram' and/or 'email' sections.
+    Telegram: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.
+    Email: set EMAIL_SMTP_HOST, EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECEIVER.
     """
-    tg = cfg.get("telegram")
-    if tg and tg.get("bot_token") and tg.get("chat_id"):
-        send_telegram(tg["bot_token"], str(tg["chat_id"]), message)
+    # Telegram
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if bot_token and chat_id:
+        send_telegram(bot_token, chat_id, message)
 
-    em = cfg.get("email")
-    if em and em.get("smtp_host") and em.get("receiver"):
-        send_email(
-            smtp_host=em["smtp_host"],
-            smtp_port=em.get("smtp_port", 465),
-            sender=em["sender"],
-            password=em["password"],
-            receiver=em["receiver"],
-            subject=subject,
-            body=message,
-        )
+    # Email
+    smtp_host = os.environ.get("EMAIL_SMTP_HOST")
+    sender = os.environ.get("EMAIL_SENDER")
+    password = os.environ.get("EMAIL_PASSWORD")
+    receiver = os.environ.get("EMAIL_RECEIVER")
+    if smtp_host and sender and password and receiver:
+        smtp_port = int(os.environ.get("EMAIL_SMTP_PORT", "465"))
+        send_email(smtp_host, smtp_port, sender, password, receiver, subject, message)
