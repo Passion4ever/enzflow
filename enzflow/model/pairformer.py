@@ -6,8 +6,11 @@ Each block updates both the token and pair representations:
 
 Key design choices:
 - QK LayerNorm prevents attention logit explosion in deep stacks
-- All output projections are zero-initialized
-- AdaLN gates start at 0 (identity at init)
+- AdaLN gates (alpha) are zero-initialized (identity at init)
+- Attention out_proj and FFN w2 use DEFAULT init (NOT zero-init).
+  If both gate AND sublayer output are zero-init'd, the product
+  gate * sublayer_output = 0*0 has zero Jacobian w.r.t. both terms,
+  so neither ever receives gradient -- a dead-parameter bug.
 - No triangle updates (Proteina showed they are not necessary)
 - No attention dropout (flow matching models typically skip it)
 """
@@ -25,9 +28,11 @@ from enzflow.model.adaln import AdaLNZero
 
 
 class SwiGLUFFN(nn.Module):
-    """SwiGLU feed-forward network with zero-initialized output.
+    """SwiGLU feed-forward network.
 
     SwiGLU: SiLU(xW1a) * xW1b -> W2 (Shazeer 2020).
+    w2 uses default (Kaiming) init. Zero-gating at init is handled
+    exclusively by AdaLN-Zero's alpha gate.
     """
 
     def __init__(self, d_model: int, d_ff: int | None = None) -> None:
@@ -37,7 +42,6 @@ class SwiGLUFFN(nn.Module):
             d_ff = int(8 / 3 * d_model + 7) // 8 * 8
         self.w1 = nn.Linear(d_model, d_ff * 2, bias=False)
         self.w2 = nn.Linear(d_ff, d_model, bias=False)
-        nn.init.zeros_(self.w2.weight)
 
     def forward(self, x: Tensor) -> Tensor:
         a, b = self.w1(x).chunk(2, dim=-1)
@@ -71,8 +75,8 @@ class PairBiasedAttention(nn.Module):
         # Pair bias: [B, N, N, d_pair] -> [B, n_heads, N, N]
         self.pair_bias_proj = nn.Linear(d_pair, n_heads, bias=False)
 
-        # Zero-init output
-        nn.init.zeros_(self.out_proj.weight)
+        # out_proj uses default init. Zero-gating at init is handled
+        # exclusively by AdaLN-Zero's alpha gate.
 
     def forward(
         self, x: Tensor, pair_repr: Tensor, seq_mask: Tensor

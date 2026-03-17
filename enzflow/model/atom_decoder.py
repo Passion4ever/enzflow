@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch.nn as nn
 from torch import Tensor
 
-from enzflow.model.atom_encoder import IntraResidueBlock
+from enzflow.model.atom_encoder import CrossResidueBlock
 
 
 class AtomDecoder(nn.Module):
@@ -37,7 +37,7 @@ class AtomDecoder(nn.Module):
         self.d_atom = d_atom
 
         self.token_to_atom = nn.Linear(d_token, d_atom)
-        self.blocks = nn.ModuleList([IntraResidueBlock(d_atom) for _ in range(n_layers)])
+        self.blocks = nn.ModuleList([CrossResidueBlock(d_atom) for _ in range(n_layers)])
         self.to_velocity = nn.Linear(d_atom, 3)
 
         # Zero-init velocity projection: initial v_theta ~ 0
@@ -69,11 +69,9 @@ class AtomDecoder(nn.Module):
         # Skip connection
         atom_feat = atom_repr + token_broadcast  # [B, N, 14, d_atom]
 
-        # Intra-residue attention
-        atom_feat = atom_feat.reshape(B * N, 14, self.d_atom)
+        # Cross-residue attention
         for block in self.blocks:
-            atom_feat = block(atom_feat)
-        atom_feat = atom_feat.reshape(B, N, 14, self.d_atom)
+            atom_feat = block(atom_feat, atom_mask)
 
         # Project to velocity
         v = self.to_velocity(atom_feat)  # [B, N, 14, 3]
