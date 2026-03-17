@@ -1,5 +1,5 @@
 # Stage 1: AFDB pretraining - learn general protein geometry
-run_name: pretrain_v1
+run_name: pt_tmp
 
 model:
   d_token: 512
@@ -13,10 +13,12 @@ model:
 training:
   batch_size: 6
   max_steps: 1000000
-  lr: 5.0e-5
-  warmup_steps: 10000
+  lr: 1.0e-4
+  warmup_steps: 5000
   weight_decay: 0.01
   grad_clip: 1.0
+  seq_loss_weight: 1.0
+  bond_loss_weight: 0.0
   bf16: true
   seed: 42
 
@@ -27,7 +29,8 @@ data:
 
 logging:
   log_every: 200
-  ckpt_every: 10000
+  ckpt_every: 5000
   max_ckpts: 5
+  milestone_every: 50000
   wandb: true
   wandb_project: enzflow

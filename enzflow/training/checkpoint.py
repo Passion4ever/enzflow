@@ -84,10 +84,13 @@ def cleanup_checkpoints(
     ckpt_dir: str | Path,
     max_ckpts: int = 3,
     best_path: str = "best.pt",
+    milestone_every: int = 0,
 ) -> None:
     """Keep only the most recent *max_ckpts* step checkpoints + best.
 
     Step checkpoints are identified by the pattern ``step_XXXXX.pt``.
+    If *milestone_every* > 0, checkpoints at multiples of that value
+    (e.g. 50000, 100000, ...) are permanently kept and never deleted.
     """
     ckpt_dir = Path(ckpt_dir)
     pattern = re.compile(r"^step_(\d+)\.pt$")
@@ -103,6 +106,9 @@ def cleanup_checkpoints(
     to_remove = step_files[max_ckpts:]
 
     best = ckpt_dir / best_path
-    for _, f in to_remove:
-        if f != best:
-            f.unlink(missing_ok=True)
+    for step_num, f in to_remove:
+        if f == best:
+            continue
+        if milestone_every > 0 and step_num % milestone_every == 0:
+            continue
+        f.unlink(missing_ok=True)

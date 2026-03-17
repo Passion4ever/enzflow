@@ -31,12 +31,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.utils import set_seed
+from torchbell import TorchBell
 
 from enzflow.data.dataset import build_dataloader
+from enzflow.data.residue_constants import RESTYPE_3TO1, RESTYPES, get_atom14_mask
+from enzflow.data.transforms import COORD_SCALE
+from enzflow.evaluation.geometry import evaluate_geometry
 from enzflow.model import AllAtomFlowModel
 from enzflow.training import (
     cleanup_checkpoints,
@@ -72,6 +77,8 @@ def load_config(config_path: str | None, cli_overrides: dict) -> dict:
             "warmup_steps": 1000,
             "weight_decay": 0.01,
             "grad_clip": 1.0,
+            "seq_loss_weight": 0.5,
+            "bond_loss_weight": 0.0,
             "bf16": True,
             "seed": 42,
         },
@@ -85,6 +92,7 @@ def load_config(config_path: str | None, cli_overrides: dict) -> dict:
             "log_every": 50,
             "ckpt_every": 5000,
             "max_ckpts": 3,
+            "milestone_every": 0,
             "wandb": False,
             "wandb_project": "enzflow",
         },
@@ -119,6 +127,8 @@ def load_config(config_path: str | None, cli_overrides: dict) -> dict:
         "warmup_steps": ("training", "warmup_steps"),
         "weight_decay": ("training", "weight_decay"),
         "grad_clip": ("training", "grad_clip"),
+        "seq_loss_weight": ("training", "seq_loss_weight"),
+        "bond_loss_weight": ("training", "bond_loss_weight"),
         "bf16": ("training", "bf16"),
         "seed": ("training", "seed"),
         # data
@@ -129,6 +139,7 @@ def load_config(config_path: str | None, cli_overrides: dict) -> dict:
         "log_every": ("logging", "log_every"),
         "ckpt_every": ("logging", "ckpt_every"),
         "max_ckpts": ("logging", "max_ckpts"),
+        "milestone_every": ("logging", "milestone_every"),
         "wandb": ("logging", "wandb"),
         "wandb_project": ("logging", "wandb_project"),
         # top-level
@@ -182,6 +193,8 @@ def parse_args() -> tuple[str | None, dict]:
     p.add_argument("--warmup_steps", type=int, default=None)
     p.add_argument("--weight_decay", type=float, default=None)
     p.add_argument("--grad_clip", type=float, default=None)
+    p.add_argument("--seq_loss_weight", type=float, default=None)
+    p.add_argument("--bond_loss_weight", type=float, default=None)
     p.add_argument("--bf16", action="store_true", default=None)
     p.add_argument("--no_bf16", action="store_true")
     p.add_argument("--seed", type=int, default=None)
@@ -195,6 +208,7 @@ def parse_args() -> tuple[str | None, dict]:
     p.add_argument("--log_every", type=int, default=None)
     p.add_argument("--ckpt_every", type=int, default=None)
     p.add_argument("--max_ckpts", type=int, default=None)
+    p.add_argument("--milestone_every", type=int, default=None)
     p.add_argument("--wandb", action="store_true", default=None)
     p.add_argument("--wandb_project", type=str, default=None)
 
@@ -252,6 +266,139 @@ def _load_dotenv(path: str = ".env") -> None:
                 continue
             key, val = line.split("=", 1)
             os.environ.setdefault(key.strip(), val.strip())
+
+
+@torch.no_grad()
+def sample_validation(model, device, logger, n_samples=10, seq_len=100, num_steps=50):
+    """Quick sampling validation: generate structures and compute geometry metrics.
+
+    Samples one protein at a time (B=1) to minimize peak GPU memory.
+    Returns a dict of metrics suitable for wandb logging.
+    Runs on main process only, with the unwrapped model in eval mode.
+    """
+    model.eval()
+    atom14_mask_table = get_atom14_mask().to(device)
+    avg_mask = atom14_mask_table.mean(dim=0)
+    dt = 1.0 / num_steps
+
+    all_coords = []
+    all_aatype = []
+
+    for _ in range(n_samples):
+        B, N = 1, seq_len
+        noise_scale = 0.133 * (N ** 0.40)
+        x = noise_scale * torch.randn(B, N, 14, 3, device=device)
+        ec_embed = torch.zeros(B, 1024, device=device)
+        aatype_input = torch.full((B, N), 20, dtype=torch.long, device=device)
+        motif_mask = torch.zeros(B, N, dtype=torch.bool, device=device)
+        seq_mask = torch.ones(B, N, dtype=torch.bool, device=device)
+        residue_index = torch.arange(1, N + 1, device=device).unsqueeze(0)
+        random_aa = torch.randint(0, 20, (B, N), device=device)
+        atom_mask = atom14_mask_table[random_aa].bool()  # [B, N, 14]
+
+        for step_i in range(num_steps):
+            t = torch.full((B,), step_i * dt, device=device)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                v_pred, seq_logits = model(
+                    x_t=x, t=t, atom_mask=atom_mask, aatype=aatype_input,
+                    residue_index=residue_index, ec_embed=ec_embed,
+                    motif_mask=motif_mask, seq_mask=seq_mask,
+                )
+            v_pred = v_pred.clamp(-10, 10)
+            x = x + dt * v_pred
+
+            seq_probs = seq_logits.softmax(dim=-1)
+            soft_mask = torch.einsum("bna,aj->bnj", seq_probs, atom14_mask_table)
+            atom_mask = soft_mask >= 0.5
+
+        all_coords.append((x[0].float() * COORD_SCALE).cpu().numpy())
+        all_aatype.append(seq_logits[0].argmax(dim=-1).cpu())
+
+    # Free GPU memory from sampling tensors
+    del x, ec_embed, aatype_input, motif_mask, seq_mask, residue_index, atom_mask
+    torch.cuda.empty_cache()
+
+    # Compute geometry metrics on CPU using evaluate_geometry
+    all_geo: dict[str, list[float]] = {}
+    all_aa = []
+
+    for coords, aatype_pred in zip(all_coords, all_aatype, strict=True):
+        # Build atom_mask from predicted aatype
+        pred_mask = get_atom14_mask()[aatype_pred].bool().numpy()  # [N, 14]
+        geo = evaluate_geometry(coords, pred_mask)
+        for k, v in geo.items():
+            all_geo.setdefault(k, []).append(v)
+
+        seq = "".join(RESTYPE_3TO1[RESTYPES[aa.item()]] for aa in aatype_pred)
+        all_aa.extend(list(seq))
+
+    unique_aa = len(set(all_aa))
+
+    # Aggregate across samples
+    metrics: dict[str, float] = {"val/unique_aa_types": unique_aa}
+
+    # Bond lengths: group mean/mae/ideal per bond type for wandb auto-grouping
+    for name in ["N_CA", "CA_C", "C_O", "C_N_pep", "CA_CA"]:
+        mean_key = f"bond_{name}_mean"
+        mae_key = f"bond_{name}_mae"
+        ideal_key = f"bond_{name}_ideal"
+        if mean_key in all_geo:
+            metrics[f"val_bond_{name}/mean"] = float(np.mean(all_geo[mean_key]))
+            metrics[f"val_bond_{name}/mae"] = float(np.mean(all_geo[mae_key]))
+            metrics[f"val_bond_{name}/ideal"] = float(all_geo[ideal_key][0])
+
+    if "bond_mae_all" in all_geo:
+        metrics["val/bond_mae_all"] = float(np.mean(all_geo["bond_mae_all"]))
+        metrics["val/bond_within_0.05A"] = float(np.mean(all_geo["bond_within_0.05A"]))
+
+    # Bond angles: MAE in degrees
+    for name in ["N_CA_C", "CA_C_N", "C_N_CA"]:
+        mae_key = f"angle_{name}_mae_deg"
+        mean_key = f"angle_{name}_mean_deg"
+        ideal_key = f"angle_{name}_ideal"
+        if mae_key in all_geo:
+            metrics[f"val_angle_{name}/mae_deg"] = float(np.mean(all_geo[mae_key]))
+            metrics[f"val_angle_{name}/mean_deg"] = float(np.mean(all_geo[mean_key]))
+            metrics[f"val_angle_{name}/ideal_deg"] = float(np.mean(all_geo[ideal_key]))
+
+    if "angle_mae_all_deg" in all_geo:
+        metrics["val/angle_mae_all_deg"] = float(np.mean(all_geo["angle_mae_all_deg"]))
+        metrics["val/angle_within_5deg"] = float(np.mean(all_geo["angle_within_5deg"]))
+
+    # Ramachandran
+    if "rama_allowed_ratio" in all_geo:
+        metrics["val/rama_allowed_pct"] = float(np.mean(all_geo["rama_allowed_ratio"])) * 100
+
+    # Clashes
+    if "clash_ratio" in all_geo:
+        metrics["val/clash_ratio"] = float(np.mean(all_geo["clash_ratio"]))
+        metrics["val/clash_count"] = float(np.mean(all_geo["clash_count"]))
+
+    # Log summary
+    logger.info(
+        "  [val] Bond MAE=%.3fA (within 0.05A: %.0f%%)  "
+        "Angle MAE=%.1fdeg (within 5deg: %.0f%%)  "
+        "Rama=%.0f%%  Clash=%.4f  AA=%d/20",
+        metrics.get("val/bond_mae_all", 0),
+        metrics.get("val/bond_within_0.05A", 0) * 100,
+        metrics.get("val/angle_mae_all_deg", 0),
+        metrics.get("val/angle_within_5deg", 0) * 100,
+        metrics.get("val/rama_allowed_pct", 0),
+        metrics.get("val/clash_ratio", 0),
+        unique_aa,
+    )
+    # Per-bond details
+    for name, ideal in [("N_CA", 1.458), ("CA_C", 1.525), ("C_O", 1.229),
+                        ("C_N_pep", 1.329), ("CA_CA", 3.80)]:
+        if f"val_bond_{name}/mean" in metrics:
+            logger.info(
+                "    %-8s  %.3fA (ideal %.3f, MAE %.4f)",
+                name, metrics[f"val_bond_{name}/mean"], ideal,
+                metrics[f"val_bond_{name}/mae"],
+            )
+
+    model.train()
+    return metrics
 
 
 def main():
@@ -354,19 +501,42 @@ def main():
             init_kwargs={"wandb": {"name": cfg["run_name"]}},
         )
 
+    # --- TorchBell monitoring (optional, needs TG_BOT_TOKEN/TG_CHAT_ID) ---
+    bell = None
+    try:
+        bell = TorchBell(
+            run_name=cfg["run_name"],
+            accelerator=accelerator,
+            unit="step",
+        )
+        bell.start(total=tcfg["max_steps"])
+    except (ValueError, Exception) as exc:
+        logger.warning("TorchBell disabled: %s", exc)
+        bell = None
+
     # --- Training loop ---
     model.train()
     train_iter = infinite_loader(train_loader, orig_batch_sampler)
     t0 = time.time()
     cur_step = start_step
+    last_loss = float("nan")
 
     logger.info("")
     logger.info("Starting training from step %d to %d", start_step, tcfg["max_steps"])
-    logger.info(
-        "%8s | %10s | %8s | %10s | %8s | %8s",
-        "Step", "loss", "grad", "lr", "|v|", "time",
-    )
-    logger.info("-" * 70)
+    has_bond_loss = tcfg.get("bond_loss_weight", 0.0) > 0
+    if has_bond_loss:
+        logger.info(
+            "%8s | %10s | %10s | %10s | %10s | %8s | %10s | %8s | %8s",
+            "Step", "loss", "coord_loss", "seq_loss", "bond_loss",
+            "grad", "lr", "|v|", "time",
+        )
+        logger.info("-" * 110)
+    else:
+        logger.info(
+            "%8s | %10s | %10s | %10s | %8s | %10s | %8s | %8s",
+            "Step", "loss", "coord_loss", "seq_loss", "grad", "lr", "|v|", "time",
+        )
+        logger.info("-" * 95)
 
     try:
         for step in range(start_step, tcfg["max_steps"]):
@@ -374,8 +544,13 @@ def main():
             batch = next(train_iter)
 
             with accelerator.autocast():
-                loss, v_mag = rectified_flow_loss(model, batch, accelerator.device)
+                loss, v_mag, coord_loss_val, seq_loss_val, bond_loss_val = rectified_flow_loss(
+                    model, batch, accelerator.device,
+                    seq_loss_weight=tcfg["seq_loss_weight"],
+                    bond_loss_weight=tcfg.get("bond_loss_weight", 0.0),
+                )
 
+            last_loss = loss.item()
             optimizer.zero_grad(set_to_none=True)
             accelerator.backward(loss)
             grad_norm = accelerator.clip_grad_norm_(
@@ -390,23 +565,43 @@ def main():
             if step % lcfg["log_every"] == 0 or step == start_step:
                 lr = optimizer.param_groups[0]["lr"]
                 elapsed = time.time() - t0
-                logger.info(
-                    "Step %6d | loss %9.2f | grad %7.2f | "
-                    "lr %.1e | |v| %7.4f | %7.1fs",
-                    step, loss.item(), grad_norm, lr, v_mag, elapsed,
-                )
-                if lcfg["wandb"]:
-                    accelerator.log(
-                        {
-                            "train/loss": loss.item(),
-                            "train/grad_norm": grad_norm,
-                            "train/lr": lr,
-                            "train/v_mag": v_mag,
-                        },
-                        step=step,
+                if has_bond_loss:
+                    logger.info(
+                        "Step %6d | loss %9.2f | coord %9.2f | "
+                        "seq %9.4f | bond %9.4f | grad %7.2f | "
+                        "lr %.1e | |v| %7.4f | %7.1fs",
+                        step, loss.item(), coord_loss_val, seq_loss_val,
+                        bond_loss_val, grad_norm, lr, v_mag, elapsed,
                     )
+                else:
+                    logger.info(
+                        "Step %6d | loss %9.2f | coord %9.2f | "
+                        "seq %9.4f | grad %7.2f | "
+                        "lr %.1e | |v| %7.4f | %7.1fs",
+                        step, loss.item(), coord_loss_val, seq_loss_val,
+                        grad_norm, lr, v_mag, elapsed,
+                    )
+                if bell:
+                    bell.log(step, {
+                        "loss": round(loss.item(), 4),
+                        "coord": round(coord_loss_val, 4),
+                        "seq": round(seq_loss_val, 4),
+                        "lr": f"{lr:.1e}",
+                    })
+                if lcfg["wandb"]:
+                    log_dict = {
+                        "train/loss": loss.item(),
+                        "train/coord_loss": coord_loss_val,
+                        "train/seq_loss": seq_loss_val,
+                        "train/grad_norm": grad_norm,
+                        "train/lr": lr,
+                        "train/v_mag": v_mag,
+                    }
+                    if has_bond_loss:
+                        log_dict["train/bond_loss"] = bond_loss_val
+                    accelerator.log(log_dict, step=step)
 
-            # --- Checkpoint ---
+            # --- Checkpoint + validation ---
             if step > 0 and step % lcfg["ckpt_every"] == 0:
                 if accelerator.is_main_process:
                     ckpt_path = run_dir / f"step_{step:06d}.pt"
@@ -415,15 +610,28 @@ def main():
                         ckpt_path, step, unwrapped, optimizer, None,
                         scheduler, model_cfg,
                     )
-                    cleanup_checkpoints(run_dir, lcfg["max_ckpts"])
+                    cleanup_checkpoints(
+                        run_dir, lcfg["max_ckpts"],
+                        milestone_every=lcfg["milestone_every"],
+                    )
+                    # Quick sampling validation
+                    val_metrics = sample_validation(
+                        unwrapped, accelerator.device, logger,
+                    )
+                    if lcfg["wandb"]:
+                        accelerator.log(val_metrics, step=step)
                 accelerator.wait_for_everyone()
                 logger.info("Step %6d | checkpoint step_%06d.pt", step, step)
 
     except Exception as e:
+        # --- TorchBell crash notification ---
+        if bell:
+            bell.error(e)
         # --- Emergency checkpoint ---
         elapsed = time.time() - t0
         err_type = type(e).__name__
         logger.error("CRASHED at step %d: %s: %s", cur_step, err_type, e)
+        logger.error("Traceback:", exc_info=True)
         if accelerator.is_main_process:
             try:
                 ckpt_path = run_dir / f"emergency_step_{cur_step:06d}.pt"
@@ -456,6 +664,8 @@ def main():
     accelerator.wait_for_everyone()
 
     elapsed = time.time() - t0
+    if bell:
+        bell.finish({"loss": round(last_loss, 4), "steps": tcfg["max_steps"]})
     logger.info("")
     logger.info(
         "Training complete. %d steps in %.1fh", tcfg["max_steps"], elapsed / 3600
@@ -469,7 +679,7 @@ def main():
         msg = (
             f"*{cfg['run_name']}* DONE\n"
             f"Steps: {tcfg['max_steps']}, Time: {elapsed / 3600:.1f}h\n"
-            f"Final loss: {loss.item():.2f}"
+            f"Final loss: {last_loss:.2f}"
         )
         notify(cfg, msg, subject="enzflow training complete")
 

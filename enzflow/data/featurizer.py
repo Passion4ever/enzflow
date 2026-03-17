@@ -27,7 +27,7 @@ _CA_INDEX = 1
 def rbf_encode(
     distances: Tensor,
     d_min: float = 0.0,
-    d_max: float = 22.0,
+    d_max: float = 2.5,
     num_rbf: int = 16,
 ) -> Tensor:
     """Encode distances with Gaussian radial basis functions.
@@ -35,6 +35,8 @@ def rbf_encode(
     Places ``num_rbf`` Gaussian kernels evenly between ``d_min`` and
     ``d_max``, and returns the (unnormalized) Gaussian response for each
     input distance.
+
+    Default d_max=2.5 covers normalized CA-CA distances (raw 22 A / COORD_SCALE 9).
 
     Args:
         distances: Tensor of any shape containing distance values.

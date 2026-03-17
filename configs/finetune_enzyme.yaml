@@ -17,6 +17,7 @@ training:
   warmup_steps: 500
   weight_decay: 0.01
   grad_clip: 1.0
+  seq_loss_weight: 0.5
   bf16: true
   seed: 42
 

@@ -12,13 +12,16 @@ def get_cosine_schedule_with_warmup(
     optimizer: Optimizer,
     warmup_steps: int,
     max_steps: int,
+    min_lr_ratio: float = 0.01,
 ) -> LambdaLR:
-    """Linear warmup from 0 to base lr, then cosine decay to 0.
+    """Linear warmup from 0 to base lr, then cosine decay to min_lr.
 
     Args:
         optimizer: Optimizer whose lr to schedule.
         warmup_steps: Steps for linear warmup phase.
         max_steps: Total training steps.
+        min_lr_ratio: Minimum lr as fraction of base lr (default 0.01,
+            i.e. lr=1e-4 decays to 1e-6).
 
     Returns:
         LambdaLR scheduler (call .step() every training step).
@@ -28,6 +31,6 @@ def get_cosine_schedule_with_warmup(
         if step < warmup_steps:
             return step / max(1, warmup_steps)
         progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
     return LambdaLR(optimizer, lr_lambda)

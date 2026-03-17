@@ -76,7 +76,8 @@ class TestRandomSE3Augmentation:
         assert ca_centroid.abs().max() < 1e-4, f"CA centroid not at origin: {ca_centroid}"
 
     def test_distances_preserved(self, sample_protein):
-        """SE(3) is distance-preserving: pairwise CA distances should not change."""
+        """SE(3) + normalization: pairwise distances scale by 1/COORD_SCALE."""
+        from enzflow.data.transforms import COORD_SCALE
         coords, mask = sample_protein
         ca_before = coords[:, 1, :]
         dist_before = torch.cdist(ca_before.unsqueeze(0), ca_before.unsqueeze(0)).squeeze(0)
@@ -85,10 +86,11 @@ class TestRandomSE3Augmentation:
         ca_after = out[:, 1, :]
         dist_after = torch.cdist(ca_after.unsqueeze(0), ca_after.unsqueeze(0)).squeeze(0)
 
-        torch.testing.assert_close(dist_before, dist_after, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(dist_before / COORD_SCALE, dist_after, atol=1e-4, rtol=1e-4)
 
     def test_bond_lengths_preserved(self, sample_protein):
-        """Intra-residue distances (bond lengths) should be preserved."""
+        """Intra-residue distances scale by 1/COORD_SCALE after augmentation."""
+        from enzflow.data.transforms import COORD_SCALE
         coords, mask = sample_protein
         # Distance between atom 0 (N) and atom 1 (CA) for each residue
         bond_before = (coords[:, 0, :] - coords[:, 1, :]).norm(dim=-1)
@@ -96,7 +98,7 @@ class TestRandomSE3Augmentation:
         out = random_se3_augmentation(coords, mask)
         bond_after = (out[:, 0, :] - out[:, 1, :]).norm(dim=-1)
 
-        torch.testing.assert_close(bond_before, bond_after, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(bond_before / COORD_SCALE, bond_after, atol=1e-4, rtol=1e-4)
 
     def test_different_each_call(self, sample_protein):
         """Two augmentations of the same protein should differ."""

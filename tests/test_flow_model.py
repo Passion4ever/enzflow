@@ -46,8 +46,9 @@ def test_time_embedding_different_t():
 def test_forward_shape():
     model = AllAtomFlowModel(**CFG)
     batch = _make_batch()
-    v = model(**batch)
+    v, seq_logits = model(**batch)
     assert v.shape == (B, N, 14, 3)
+    assert seq_logits.shape == (B, N, 20)
 
 
 def test_simulated_batch_dict():
@@ -59,17 +60,19 @@ def test_simulated_batch_dict():
     batch["aatype"][:, 5:] = 20  # MASK
     batch["motif_mask"][:, :3] = True
     batch["seq_mask"][:, 8:] = False
-    v = model(**batch)
+    v, seq_logits = model(**batch)
     assert v.shape == (B, N, 14, 3)
+    assert seq_logits.shape == (B, N, 20)
     assert not torch.isnan(v).any()
+    assert not torch.isnan(seq_logits).any()
 
 
 def test_backward_no_nan():
     model = AllAtomFlowModel(**CFG)
     batch = _make_batch()
     batch["x_t"].requires_grad_(True)
-    v = model(**batch)
-    loss = v.sum()
+    v, seq_logits = model(**batch)
+    loss = v.sum() + seq_logits.sum()
     loss.backward()
     assert batch["x_t"].grad is not None
     assert not torch.isnan(batch["x_t"].grad).any()
@@ -88,7 +91,7 @@ def test_virtual_atoms_zero():
     model = AllAtomFlowModel(**CFG)
     batch = _make_batch()
     batch["atom_mask"][:, :, 5:] = False
-    v = model(**batch)
+    v, _ = model(**batch)
     virtual = ~batch["atom_mask"]
     assert (v[virtual.unsqueeze(-1).expand_as(v)] == 0).all()
 
@@ -98,8 +101,9 @@ def test_unconditional_ec_zero():
     model = AllAtomFlowModel(**CFG)
     batch = _make_batch()
     batch["ec_embed"].zero_()
-    v = model(**batch)
+    v, seq_logits = model(**batch)
     assert not torch.isnan(v).any()
+    assert not torch.isnan(seq_logits).any()
 
 
 def test_all_mask_aatype():
@@ -107,8 +111,9 @@ def test_all_mask_aatype():
     model = AllAtomFlowModel(**CFG)
     batch = _make_batch()
     batch["aatype"].fill_(20)
-    v = model(**batch)
+    v, seq_logits = model(**batch)
     assert not torch.isnan(v).any()
+    assert not torch.isnan(seq_logits).any()
 
 
 def test_motif_mode():
@@ -117,15 +122,16 @@ def test_motif_mode():
     batch = _make_batch()
     batch["motif_mask"][:, :5] = True
     batch["aatype"][:, 5:] = 20
-    v = model(**batch)
+    v, seq_logits = model(**batch)
     assert not torch.isnan(v).any()
+    assert not torch.isnan(seq_logits).any()
 
 
 def test_initial_velocity_near_zero():
     """At init, v_theta should be approximately zero (zero-init decoder)."""
     model = AllAtomFlowModel(**CFG)
     batch = _make_batch()
-    v = model(**batch)
+    v, _ = model(**batch)
     assert v.abs().max() < 1e-4, f"Max velocity at init: {v.abs().max()}"
 
 

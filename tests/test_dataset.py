@@ -181,7 +181,8 @@ class TestProteinDataset:
         assert not torch.allclose(c1, c2)
 
     def test_se3_distance_preservation(self, data_dir):
-        """SE(3) should preserve pairwise CA distances."""
+        """SE(3) + normalization: distances scale by 1/COORD_SCALE."""
+        from enzflow.data.transforms import COORD_SCALE
         ds = ProteinDataset(data_dir, motif_prob=0.0)
         # Load raw coords
         raw = torch.load(ds.paths[0], map_location="cpu", weights_only=False)
@@ -192,27 +193,23 @@ class TestProteinDataset:
         aug_ca = sample["coords"][:, 1, :]
         aug_dist = torch.cdist(aug_ca.unsqueeze(0), aug_ca.unsqueeze(0)).squeeze(0)
 
-        assert torch.allclose(raw_dist, aug_dist, atol=1e-4)
+        assert torch.allclose(raw_dist / COORD_SCALE, aug_dist, atol=1e-4)
 
     def test_motif_prob_zero(self, data_dir):
-        """motif_prob=0 => all masked, motif_mask all False."""
+        """motif_prob=0 => motif_mask all False, aatype unchanged."""
         ds = ProteinDataset(data_dir, motif_prob=0.0)
         sample = ds[0]
-        assert (sample["aatype"] == MASK_TOKEN).all()
         assert not sample["motif_mask"].any()
+        # aatype should be real values (0-19), not masked
+        assert (sample["aatype"] < MASK_TOKEN).all()
 
     def test_motif_prob_one(self, data_dir):
-        """motif_prob=1 => some residues keep real aatype."""
+        """motif_prob=1 => some motif residues selected."""
         ds = ProteinDataset(data_dir, motif_prob=1.0)
         sample = ds[0]
         assert sample["motif_mask"].any()
-        # Motif residues should have aatype < 20
-        motif_aa = sample["aatype"][sample["motif_mask"]]
-        assert (motif_aa < MASK_TOKEN).all()
-        # Scaffold residues should be masked
-        scaffold_aa = sample["aatype"][~sample["motif_mask"]]
-        if scaffold_aa.numel() > 0:
-            assert (scaffold_aa == MASK_TOKEN).all()
+        # All aatype should be real values (0-19)
+        assert (sample["aatype"] < MASK_TOKEN).all()
 
     def test_motif_count_range(self, data_dir):
         """Motif residue count should be in [min, max]."""

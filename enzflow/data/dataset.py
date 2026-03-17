@@ -185,13 +185,13 @@ class ProteinDataset(Dataset):
         # -- 2. EC embedding sampling --
         ec_embed = self._sample_ec_embed(ec_numbers)
 
-        # -- 3. Motif + aatype masking --
-        aatype, motif_mask = self._apply_motif_masking(aatype, N)
+        # -- 3. Motif selection --
+        motif_mask = self._select_motif(N)
 
         return {
             "coords": coords,                               # [N, 14, 3]
             "atom_mask": atom_mask,                          # [N, 14]
-            "aatype": aatype,                                # [N]
+            "aatype": aatype,                                # [N] real labels (0-19)
             "residue_index": residue_index,                  # [N]
             "motif_mask": motif_mask,                         # [N]
             "ec_embed": ec_embed,                             # [d_embed]
@@ -222,32 +222,22 @@ class ProteinDataset(Dataset):
         except KeyError:
             return self.ec_lookup.get_zero_vector()
 
-    def _apply_motif_masking(
-        self, aatype: Tensor, n_res: int
-    ) -> tuple[Tensor, Tensor]:
-        """Apply motif selection and aatype masking.
+    def _select_motif(self, n_res: int) -> Tensor:
+        """Select motif residues randomly.
 
         Returns:
-            (masked_aatype, motif_mask) where motif_mask[i]=True means
-            residue i is a motif residue (keeps its real aatype).
+            motif_mask: ``[N]`` bool, True for motif residues.
         """
-        aatype = aatype.clone()
         motif_mask = torch.zeros(n_res, dtype=torch.bool)
 
         if random.random() < self.motif_prob:
-            # Enable motif conditioning
             n_motif = random.randint(
                 self.motif_min_res, min(self.motif_max_res, n_res)
             )
             motif_indices = random.sample(range(n_res), n_motif)
             motif_mask[motif_indices] = True
-            # Mask scaffold positions
-            aatype[~motif_mask] = MASK_TOKEN
-        else:
-            # Unconditional generation: mask all
-            aatype[:] = MASK_TOKEN
 
-        return aatype, motif_mask
+        return motif_mask
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +278,7 @@ def collate_fn(batch: list[dict[str, Tensor]]) -> dict[str, Tensor]:
     return {
         "coords": coords,                         # [B, max_N, 14, 3]
         "atom_mask": atom_mask,                    # [B, max_N, 14]
-        "aatype": aatype,                          # [B, max_N]
+        "aatype": aatype,                          # [B, max_N] real (0-19), pad=20
         "residue_index": residue_index,            # [B, max_N]
         "motif_mask": motif_mask,                  # [B, max_N]
         "seq_mask": seq_mask,                      # [B, max_N]

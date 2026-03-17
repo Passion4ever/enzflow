@@ -39,11 +39,14 @@ class TestSampleT:
 
 
 class DummyModel(nn.Module):
-    """Minimal model that returns zeros for testing."""
+    """Minimal model that returns (v_theta, seq_logits) for testing."""
 
     def forward(self, x_t, t, atom_mask, aatype, residue_index,
                 ec_embed, motif_mask, seq_mask):
-        return torch.zeros_like(x_t)
+        B, N = x_t.shape[:2]
+        v_theta = torch.zeros_like(x_t)
+        seq_logits = torch.zeros(B, N, 20, device=x_t.device)
+        return v_theta, seq_logits
 
 
 class TestRectifiedFlowLoss:
@@ -53,7 +56,7 @@ class TestRectifiedFlowLoss:
         return {
             "coords": torch.randn(B, N, 14, 3),
             "atom_mask": torch.ones(B, N, 14, dtype=torch.bool),
-            "aatype": torch.zeros(B, N, dtype=torch.long),
+            "aatype": torch.randint(0, 20, (B, N)),
             "residue_index": torch.arange(N).unsqueeze(0).expand(B, -1),
             "motif_mask": torch.zeros(B, N, dtype=torch.bool),
             "seq_mask": torch.ones(B, N, dtype=torch.bool),
@@ -62,22 +65,54 @@ class TestRectifiedFlowLoss:
 
     def test_returns_loss_and_vmag(self, batch):
         model = DummyModel()
-        loss, v_mag = rectified_flow_loss(model, batch, torch.device("cpu"))
+        loss, v_mag, coord_loss, seq_loss, bond_loss = rectified_flow_loss(
+            model, batch, torch.device("cpu"),
+        )
         assert loss.shape == ()
         assert loss.item() > 0  # nonzero since model returns 0 but target != 0
         assert isinstance(v_mag, float)
+        assert isinstance(coord_loss, float)
+        assert isinstance(seq_loss, float)
 
     def test_loss_is_finite(self, batch):
         model = DummyModel()
-        loss, _ = rectified_flow_loss(model, batch, torch.device("cpu"))
+        loss, _, _, _, _ = rectified_flow_loss(model, batch, torch.device("cpu"))
         assert torch.isfinite(loss)
 
     def test_partial_mask(self, batch):
         # Mask out half the atoms
         batch["atom_mask"][:, :, 7:] = False
         model = DummyModel()
-        loss, _ = rectified_flow_loss(model, batch, torch.device("cpu"))
+        loss, _, _, _, _ = rectified_flow_loss(model, batch, torch.device("cpu"))
         assert torch.isfinite(loss)
+
+    def test_seq_loss_weight(self, batch):
+        model = DummyModel()
+        _, _, coord_loss, seq_loss, _ = rectified_flow_loss(
+            model, batch, torch.device("cpu"), seq_loss_weight=0.5,
+        )
+        # seq_loss should be ~ln(20) for uniform logits
+        assert seq_loss > 2.0
+
+    def test_aatype_masked_for_encoder(self, batch):
+        """Non-motif aatype should be masked to 20 before passing to model."""
+        aatype_seen = []
+
+        class SpyModel(nn.Module):
+            def forward(self, x_t, t, atom_mask, aatype, residue_index,
+                        ec_embed, motif_mask, seq_mask):
+                aatype_seen.append(aatype.clone())
+                B, N = x_t.shape[:2]
+                return torch.zeros_like(x_t), torch.zeros(B, N, 20)
+
+        batch["motif_mask"][:, :3] = True  # first 3 are motif
+        batch["aatype"].fill_(5)           # real aatype = 5
+        rectified_flow_loss(SpyModel(), batch, torch.device("cpu"))
+        seen = aatype_seen[0]
+        # Non-motif positions should be 20 (MASK)
+        assert (seen[:, 3:] == 20).all()
+        # Motif positions should keep real aatype
+        assert (seen[:, :3] == 5).all()
 
 
 # ---- scheduler ----
@@ -108,18 +143,20 @@ class TestCosineSchedule:
         opt = torch.optim.SGD([torch.zeros(1)], lr=0.1)
         sched = get_cosine_schedule_with_warmup(opt, warmup_steps=100, max_steps=1000)
 
-        # Go to end
+        # Go to end: decays to min_lr_ratio * base_lr = 0.01 * 0.1 = 0.001
         for _ in range(1000):
             sched.step()
-        assert opt.param_groups[0]["lr"] == pytest.approx(0.0, abs=1e-5)
+        assert opt.param_groups[0]["lr"] == pytest.approx(0.001, abs=1e-5)
 
     def test_midpoint(self):
         opt = torch.optim.SGD([torch.zeros(1)], lr=0.1)
+        min_r = 0.01  # default min_lr_ratio
         sched = get_cosine_schedule_with_warmup(opt, warmup_steps=0, max_steps=1000)
 
         for _ in range(500):
             sched.step()
-        expected = 0.05 * (1 + math.cos(math.pi * 0.5))
+        cosine = 0.5 * (1 + math.cos(math.pi * 0.5))
+        expected = 0.1 * (min_r + (1 - min_r) * cosine)
         assert opt.param_groups[0]["lr"] == pytest.approx(expected, abs=1e-4)
 
 

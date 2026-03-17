@@ -112,6 +112,13 @@ class AllAtomFlowModel(nn.Module):
             d_token=d_token, d_atom=d_atom, n_layers=n_atom_layers,
         )
 
+        # --- Sequence head (co-design) ---
+        self.seq_head = nn.Sequential(
+            nn.Linear(d_token, d_token),
+            nn.SiLU(),
+            nn.Linear(d_token, 20),
+        )
+
     def forward(
         self,
         x_t: Tensor,
@@ -122,7 +129,7 @@ class AllAtomFlowModel(nn.Module):
         ec_embed: Tensor,
         motif_mask: Tensor,
         seq_mask: Tensor,
-    ) -> Tensor:
+    ) -> tuple[Tensor, Tensor]:
         """Forward pass.
 
         Args:
@@ -136,7 +143,9 @@ class AllAtomFlowModel(nn.Module):
             seq_mask: ``[B, N]`` -- bool, True for real residues.
 
         Returns:
-            ``v_theta [B, N, 14, 3]`` -- predicted velocity field.
+            Tuple of (v_theta, seq_logits):
+                v_theta: ``[B, N, 14, 3]`` -- predicted velocity field.
+                seq_logits: ``[B, N, 20]`` -- amino acid type logits.
         """
         # 1. Conditioning
         cond = self.time_mlp(self.time_embed(t)) + self.ec_bottleneck(ec_embed)
@@ -157,4 +166,7 @@ class AllAtomFlowModel(nn.Module):
         # 6. Decode
         v_theta = self.atom_decoder(token_repr, atom_repr, atom_mask)
 
-        return v_theta
+        # 7. Sequence prediction
+        seq_logits = self.seq_head(token_repr)  # [B, N, 20]
+
+        return v_theta, seq_logits

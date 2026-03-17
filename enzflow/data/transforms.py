@@ -18,6 +18,11 @@ from torch import Tensor
 # Backbone atom indices in atom14 representation
 _CA_INDEX = 1
 
+# Coordinate normalization scale factor.
+# Computed from training data: std of centered atom coordinates ~ 9 Angstrom.
+# Dividing by this makes coordinate scale ~ N(0, 1), matching the noise prior.
+COORD_SCALE: float = 9.0
+
 
 def random_rotation_matrix(device: torch.device | None = None) -> Tensor:
     """Sample a rotation matrix uniformly from SO(3).
@@ -88,5 +93,8 @@ def random_se3_augmentation(
 
     # coords @ R^T  (equiv. to R @ coords^T, but batched-friendly)
     coords = torch.einsum("nai, ji -> naj", coords, R)
+
+    # -- Step 3: normalize to match noise scale --
+    coords = coords / COORD_SCALE
 
     return coords
