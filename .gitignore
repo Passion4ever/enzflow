@@ -10,14 +10,9 @@ build/
 data/
 weights/
 
-# Misc
-123
-
 # Data processing scripts (already done, not needed for training)
 data/scripts/
-scripts/*
-!scripts/train.py
-!scripts/train_sanity.py
+scripts/data_processing/
 
 # Example files
 example_pdb/
@@ -28,6 +23,7 @@ example_pdb/
 # Training outputs
 checkpoints
 wandb/
+outputs
 
 # IDE / OS
 .vscode/
@@ -41,4 +37,3 @@ wandb/
 
 # Claude Code
 .claude/
-

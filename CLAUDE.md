@@ -26,11 +26,17 @@
 
 ```bash
 # 训练 (CUDA_VISIBLE_DEVICES 控制卡数，自动检测)
-python scripts/train.py
-python scripts/train.py --wandb  # 开 wandb
+python scripts/train.py --config configs/pretrain_afdb.yaml
+python scripts/train.py --config configs/pretrain_afdb.yaml --wandb
 
-# 参数覆盖
-python scripts/train.py --lr 3e-4 --batch_size 4 --max_steps 100000
+# 采样
+CUDA_VISIBLE_DEVICES=1 python scripts/sample.py \
+    --ckpt checkpoints/pretrain_v3_.../step_XXXXX.pt \
+    --batch_size 4 --num_batches 5 --length 100 --steps 50
+
+# 评估 (读 sample.py 输出目录)
+python scripts/evaluate.py --sample_dir outputs/sample_.../
+python scripts/evaluate.py --sample_dir outputs/sample_.../ --designability  # 加 ESMFold
 ```
 
 ## 不能忘的事

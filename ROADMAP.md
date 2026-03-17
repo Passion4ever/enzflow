@@ -125,40 +125,115 @@ n_trunk=12, n_atom_layers=3, n_heads=8
 - `enzflow/training/checkpoint.py` — save/load/cleanup，保留最近 3 个
 
 ### Step 3.3: 训练入口 ✅
-- `scripts/train.py` — argparse 配置
+- `scripts/train.py` — YAML 配置 + CLI 覆盖
 - HuggingFace Accelerate 管理多卡 + AMP（CUDA_VISIBLE_DEVICES 控制卡数，自动检测）
-- AdamW, lr=1e-4, warmup 1000 steps, cosine decay, grad_clip=1.0, bf16
-- 可选 wandb 日志 (`--wandb`)
-- 无验证集，全量 173,884 样本训练
-- 200K steps，每 5000 步存 checkpoint
+- AdamW, lr=1e-4, warmup 5K steps, cosine decay (min_lr_ratio=0.01), grad_clip=1.0, bf16
+- 可选 wandb 日志 (`--wandb`)，TorchBell Telegram 通知
+- 全量 464,499 AFDB 样本训练
+- 每 5000 步存 checkpoint + milestone checkpoint 永久保留
+
+### Step 3.4: 采样验证回调 ✅
+- 每 ckpt_every 步自动采样 4 个蛋白（B=1 逐个，不会 OOM）
+- 计算几何指标：CA-CA 距离、C-N 肽键、N-CA 键长、序列多样性
+- 记录到 wandb（含 ideal 参考线），训练中实时监控结构质量
+
+### Bug 修复记录
+- **AdaLN dead gradient bug（v2 训练无效）**：PairBiasedAttention out_proj 和
+  SwiGLUFFN w2 都 zero-init，与 AdaLN gate 的 zero-init 冲突，导致
+  gate * output = 0 * 0 无梯度，12 个 trunk block 全部失效。
+  修复：只 zero-init AdaLN gate，sublayer 用 default init。
+  pretrain_v3 从头训练。
+
+### Step 3.5: Co-design 序列预测 ✅
+- 模型返回 (v_theta, seq_logits)，seq_head: Linear -> SiLU -> Linear(20)
+- aatype masking: dataset 返回真实 aatype (0-19)，flow_matching 做 mask（非 motif -> 20）
+- seq_loss = CE(seq_logits, aatype)，seq_loss_weight=1.0
+
+### Step 3.6: 坐标归一化 ✅
+- COORD_SCALE=9.0（训练数据中心化后坐标 std），使坐标 ~ N(0,1) 匹配噪声先验
+- 自适应噪声：按每个样本 CA 方差缩放噪声，保持噪声-数据比 ~1:1
+- RBF d_max 从 22A 调到 2.5 适配归一化尺度
+
+### Step 3.7: 跨残基原子注意力 ✅
+- CrossResidueBlock 替代 IntraResidueBlock（encoder + decoder）
+- 滑动窗口 (i-1, i, i+1)，query 14 atoms attend to 42 atoms
+- 学习 residue-offset embedding 区分相邻残基
+- 使模型能直接学习肽键几何和骨架二面角
 
 ### 未实现（后续按需添加）
-- [ ] 辅助 loss（bond/clash）
+- [ ] 辅助 bond loss（已实现但 weight=0，开启后收益待验证）
 - [ ] EMA（采样脚本再加）
 - [ ] Motif-scaffolding 训练（dataset 已支持，暂未开启）
 
 ---
 
-## Phase 4: 采样 + 评估 ⬜
+## Phase 4: 采样 + 评估 ✅
 
 目标：能生成蛋白质并定量评估。
 
-### Step 4.1: ODE 采样器
-- Euler 积分：x_{t+dt} = x_t + dt * v_pred（默认 20 步）
-- Midpoint 积分（可选，精度更高）
+### Step 4.1: ODE 采样器 ✅
+- `scripts/sample.py` — Euler 积分（默认 20 步，50 步以上无明显收益）
+- batch_size x num_batches 控制生成量（按 GPU 显存调 batch_size）
+- atom_mask 策略：random AA 初始化 -> 逐步 blend 到 seq_logits 预测的 hard mask
+- 输出：PDB + FASTA（给 ESMFold）+ metadata.json
+- 存储：outputs/（本地目录，可软链接到外部存储）
 
-### Step 4.2: 几何质量评估
-- 键长/键角偏差、Ramachandran、clash 检测、侧链合理性
+### Step 4.2: 几何质量评估 ✅
+- `enzflow/evaluation/geometry.py`
+- 键长/键角偏差、Ramachandran、clash 检测
 
-### Step 4.3: Designability
-- codesign 直接出序列 → ESMFold/AF2 折叠 → scTM/scRMSD
+### Step 4.3: Designability ✅
+- `enzflow/evaluation/designability.py`
+- codesign 直接出序列 -> ESMFold 折叠 -> scTM/scRMSD（可选，需 fair-esm）
 
-### Step 4.4: 多样性
+### Step 4.4: 多样性 ✅
+- `enzflow/evaluation/diversity.py`
 - 生成 N 个结构的 pairwise TM-score 分布
 
-### 验证标准
-- 无条件生成 100 个结构，scTM > 0.5 比例 > 60%
-- 键长误差 < 0.05Å，clash < 5%
+### 训练实验记录
+
+**pt_v7 (2026-03-14 ~ 03-17, 最终版)**
+- 配置: 67M params, batch=6, lr=1e-4, warmup=5K, 2卡DDP, seq_loss_weight=1.0
+- 数据: 464,499 AFDB 样本，1M 步（~25.8 epoch），耗时 77.3h
+- checkpoint: `checkpoints/pt_v7_0314_012202/`
+
+验证回调趋势（训练中 B=1, L=100, 10 samples）:
+
+| 步数 | Bond MAE | Angle MAE | Rama | Clash | AA |
+|------|----------|-----------|------|-------|----|
+| 5K | 0.486A | 35.9 deg | 68% | 0.0014 | 15/20 |
+| 50K | 0.195A | 12.3 deg | 97% | 0.0002 | 20/20 |
+| 150K | 0.112A | 7.3 deg | 98% | 0.0003 | 20/20 |
+| 350K | 0.061A | 4.3 deg | 99% | 0.0001 | 20/20 |
+| **500K (最佳)** | **0.053A** | **3.6 deg** | **99%** | **0.0001** | **20/20** |
+| 1M | 0.079A | 5.3 deg | 98% | 0.0001 | 20/20 |
+
+正式采样评估（500K 步，100 samples，L=100/200/300/500/800）:
+
+| 指标 | 值 | 目标 | 状态 |
+|------|----|------|------|
+| Bond MAE | 0.068A | < 0.05A | 接近 |
+| Bond within 0.05A | 50% | - | - |
+| Angle MAE | 4.58 deg | < 5 deg | **达标** |
+| Angle within 5 deg | 66% | - | - |
+| Ramachandran | 98.3% | > 90% | **远超** |
+| Clash ratio | 0.004% | < 5% | **远超** |
+| Diversity (TM) | 0.248 | 低 = 好 | 良好 |
+| AA types | 20/20 | 20/20 | **达标** |
+| scTM (designability) | 未测 | > 0.5 @60% | 待测 |
+
+采样步数对比（500K checkpoint，100 samples）:
+
+| Steps | Bond MAE | Angle MAE | 备注 |
+|-------|----------|-----------|------|
+| 10 | 0.118A | 7.48 deg | 太少 |
+| 50 | 0.069A | 4.73 deg | 够用 |
+| 100 | 0.068A | 4.58 deg | 边际收益小 |
+
+观察:
+- 最佳验证指标在 ~400K-550K 步，之后震荡退化
+- 500K 步为当前最佳 checkpoint
+- Designability (ESMFold scTM) 尚未测试
 
 ---
 
