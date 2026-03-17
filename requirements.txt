@@ -23,6 +23,10 @@ httpx[socks]
 # EC vector generation (data/scripts/)
 transformers==5.2.0
 
+# Evaluation
+tmtools==0.3.0
+matplotlib>=3.7
+
 # Dev
 pytest==9.0.2
 ruff==0.15.4
